@@ -459,11 +459,45 @@ def check_server_availability_with_configs(plan_code):
                 if dc_name:
                     datacenters[dc_name] = availability
             
+            # 尝试查找匹配的API2选项代码（用于价格查询）
+            api2_options = []
+            try:
+                # 使用standardize_config查找匹配的选项
+                memory_std = standardize_config(memory) if memory != "N/A" else None
+                storage_std = standardize_config(storage) if storage != "N/A" else None
+                
+                if memory_std or storage_std:
+                    # 查找catalog中匹配的选项
+                    catalog = client.get(f'/order/catalog/public/eco?ovhSubsidiary={config["zone"]}')
+                    for plan in catalog.get("plans", []):
+                        if plan.get("planCode") == plan_code:
+                            addon_families = plan.get("addonFamilies", [])
+                            
+                            for family in addon_families:
+                                family_name = family.get("name", "").lower()
+                                addons = family.get("addons", [])
+                                
+                                if family_name == "memory" and memory_std:
+                                    for addon in addons:
+                                        if standardize_config(addon) == memory_std:
+                                            if addon not in api2_options:
+                                                api2_options.append(addon)
+                                
+                                elif family_name == "storage" and storage_std:
+                                    for addon in addons:
+                                        if standardize_config(addon) == storage_std:
+                                            if addon not in api2_options:
+                                                api2_options.append(addon)
+                            break  # 找到匹配的plan后退出
+            except Exception as e:
+                add_log("WARNING", f"[配置监控] 查找API2选项代码失败: {str(e)}", "monitor")
+            
             result[config_key] = {
                 "memory": memory,
                 "storage": storage,
                 "datacenters": datacenters,
-                "fqn": fqn
+                "fqn": fqn,
+                "options": api2_options  # 添加匹配的API2选项代码
             }
             
             add_log("INFO", f"[配置监控] 配置: {memory} + {storage}, 数据中心数: {len(datacenters)}", "monitor")
@@ -654,7 +688,9 @@ def purchase_server(queue_item):
             datacenters = item.get("datacenters", [])
             
             for dc_info in datacenters:
-                if dc_info.get("datacenter") == queue_item["datacenter"] and dc_info.get("availability") not in ["unavailable", "unknown"]:
+                # 转换数据中心代码以便比较（API返回的是OVH API代码，如ynm）
+                api_dc_from_queue = _convert_display_dc_to_api_dc(queue_item["datacenter"])
+                if dc_info.get("datacenter") == api_dc_from_queue and dc_info.get("availability") not in ["unavailable", "unknown"]:
                     found_available = True
                     break
             
@@ -687,12 +723,14 @@ def purchase_server(queue_item):
         
         # Configure item (datacenter, OS, region)
         add_log("INFO", f"为项目 {item_id} 设置必需配置", "purchase")
-        dc_lower = queue_item["datacenter"].lower()
+        # 转换数据中心代码（前端显示代码 → OVH API代码）
+        api_datacenter = _convert_display_dc_to_api_dc(queue_item["datacenter"])
+        dc_lower = api_datacenter.lower()
         region = None
         EU_DATACENTERS = ['gra', 'rbx', 'sbg', 'eri', 'lim', 'waw', 'par', 'fra', 'lon']
         CANADA_DATACENTERS = ['bhs']
         US_DATACENTERS = ['vin', 'hil']
-        APAC_DATACENTERS = ['syd', 'sgp'] 
+        APAC_DATACENTERS = ['syd', 'sgp', 'ynm']  # ynm是孟买的OVH API代码 
 
         if any(dc_lower.startswith(prefix) for prefix in EU_DATACENTERS): region = "europe"
         elif any(dc_lower.startswith(prefix) for prefix in CANADA_DATACENTERS): region = "canada"
@@ -700,7 +738,7 @@ def purchase_server(queue_item):
         elif any(dc_lower.startswith(prefix) for prefix in APAC_DATACENTERS): region = "apac"
 
         configurations_to_set = {
-            "dedicated_datacenter": queue_item["datacenter"],
+            "dedicated_datacenter": api_datacenter,  # 使用转换后的数据中心代码
             "dedicated_os": "none_64.en" 
         }
         if region:
@@ -2597,6 +2635,337 @@ def get_availability(plan_code):
         return jsonify(availability)
     else:
         return jsonify({}), 404
+
+def _convert_display_dc_to_api_dc(datacenter):
+    """
+    将前端显示的数据中心代码转换为OVH API代码
+    例如：前端显示 "mum"，但OVH API使用 "ynm"
+    """
+    if not datacenter:
+        return 'gra'
+    dc_map = {
+        'mum': 'ynm',  # 孟买：前端用mum，OVH API用ynm
+    }
+    dc_lower = datacenter.lower()
+    return dc_map.get(dc_lower, dc_lower)
+
+def _get_server_price_internal(plan_code, datacenter='gra', options=None):
+    """
+    内部函数：获取配置后的服务器价格（不实际下单）
+    
+    Args:
+        plan_code: 服务器型号
+        datacenter: 数据中心，默认'gra'
+        options: addon列表，例如 ['ram-64g-ecc-3200-24rise', 'softraid-2x960nvme-24rise']
+    
+    Returns:
+        dict: {
+            "success": bool,
+            "price": {...} or None,
+            "error": str or None
+        }
+    """
+    if options is None:
+        options = []
+    
+    # 转换数据中心代码（前端显示代码 → OVH API代码）
+    api_datacenter = _convert_display_dc_to_api_dc(datacenter)
+    
+    client = get_ovh_client()
+    if not client:
+        return {"success": False, "error": "未配置OVH API密钥", "price": None}
+    
+    cart_id = None
+    try:
+        add_log("INFO", f"查询 {plan_code} 的配置价格，数据中心: {api_datacenter} (原始: {datacenter}), 选项: {options}", "price")
+        
+        # 1. 创建购物车
+        cart_result = client.post('/order/cart', ovhSubsidiary=config["zone"])
+        cart_id = cart_result["cartId"]
+        add_log("DEBUG", f"购物车创建成功，ID: {cart_id}", "price")
+        
+        # 2. 添加基础商品
+        item_payload = {
+            "planCode": plan_code,
+            "pricingMode": "default",
+            "duration": "P1M",
+            "quantity": 1
+        }
+        item_result = client.post(f'/order/cart/{cart_id}/eco', **item_payload)
+        item_id = item_result["itemId"]
+        add_log("DEBUG", f"基础商品添加成功，项目 ID: {item_id}", "price")
+        
+        # 3. 设置必需配置（数据中心、操作系统、区域）
+        dc_lower = api_datacenter.lower()  # 使用转换后的数据中心代码
+        region = None
+        EU_DATACENTERS = ['gra', 'rbx', 'sbg', 'eri', 'lim', 'waw', 'par', 'fra', 'lon']
+        CANADA_DATACENTERS = ['bhs']
+        US_DATACENTERS = ['vin', 'hil']
+        APAC_DATACENTERS = ['syd', 'sgp', 'ynm']  # ynm是孟买的OVH API代码
+        
+        if any(dc_lower.startswith(prefix) for prefix in EU_DATACENTERS): 
+            region = "europe"
+        elif any(dc_lower.startswith(prefix) for prefix in CANADA_DATACENTERS): 
+            region = "canada"
+        elif any(dc_lower.startswith(prefix) for prefix in US_DATACENTERS): 
+            region = "usa"
+        elif any(dc_lower.startswith(prefix) for prefix in APAC_DATACENTERS): 
+            region = "apac"
+        
+        configurations_to_set = {
+            "dedicated_datacenter": api_datacenter,  # 使用转换后的数据中心代码
+            "dedicated_os": "none_64.en"
+        }
+        if region:
+            configurations_to_set["region"] = region
+        
+        for label, value in configurations_to_set.items():
+            if value is None:
+                continue
+            try:
+                client.post(f'/order/cart/{cart_id}/item/{item_id}/configuration',
+                           label=label,
+                           value=str(value))
+                add_log("DEBUG", f"设置配置: {label} = {value}", "price")
+            except Exception as e:
+                add_log("WARNING", f"设置配置 {label} 失败: {str(e)}", "price")
+        
+        # 4. 添加用户选择的addons
+        if options and isinstance(options, list):
+            try:
+                available_eco_options = client.get(f'/order/cart/{cart_id}/eco/options', planCode=plan_code)
+                add_log("DEBUG", f"找到 {len(available_eco_options)} 个可用选项", "price")
+                
+                added_options = []
+                for wanted_option in options:
+                    for avail_opt in available_eco_options:
+                        if avail_opt.get("planCode") == wanted_option:
+                            try:
+                                option_payload = {
+                                    "itemId": item_id,
+                                    "planCode": wanted_option,
+                                    "duration": avail_opt.get("duration", "P1M"),
+                                    "pricingMode": avail_opt.get("pricingMode", "default"),
+                                    "quantity": 1
+                                }
+                                client.post(f'/order/cart/{cart_id}/eco/options', **option_payload)
+                                added_options.append(wanted_option)
+                                add_log("DEBUG", f"成功添加选项: {wanted_option}", "price")
+                                break
+                            except Exception as e:
+                                add_log("WARNING", f"添加选项 {wanted_option} 失败: {str(e)}", "price")
+                                break
+                
+                add_log("INFO", f"共添加 {len(added_options)} 个选项: {added_options}", "price")
+            except Exception as e:
+                add_log("WARNING", f"获取或添加选项失败: {str(e)}", "price")
+        
+        # 5. 绑定购物车
+        try:
+            client.post(f'/order/cart/{cart_id}/assign')
+            add_log("DEBUG", "购物车绑定成功", "price")
+        except Exception as e:
+            add_log("WARNING", f"绑定购物车失败（可能不需要）: {str(e)}", "price")
+        
+        # 6. 获取购物车详情和价格
+        cart_info = client.get(f'/order/cart/{cart_id}')
+        cart_summary = client.get(f'/order/cart/{cart_id}/summary')
+        
+        # 验证返回值的类型
+        if not isinstance(cart_info, dict):
+            add_log("WARNING", f"购物车info返回类型异常: {type(cart_info)}, 值: {cart_info}", "price")
+            cart_info = {}
+        if not isinstance(cart_summary, dict):
+            add_log("WARNING", f"购物车summary返回类型异常: {type(cart_summary)}, 值: {cart_summary}", "price")
+            cart_summary = {}
+        
+        # 提取价格信息
+        price_info = {
+            "pricingMode": "default",
+            "prices": {
+                "withTax": None,
+                "withoutTax": None,
+                "tax": None,
+                "currencyCode": None
+            },
+            "items": []
+        }
+        
+        # 从summary中提取总价（安全访问）
+        if cart_summary and isinstance(cart_summary, dict):
+            prices_field = cart_summary.get("prices")
+            # 确保 prices_field 是字典类型，如果不是则使用空字典
+            if isinstance(prices_field, dict):
+                prices_dict = prices_field
+            elif prices_field is not None:
+                # 如果prices不是字典（可能是整数或其他类型），记录警告并使用空字典
+                add_log("WARNING", f"购物车summary的prices字段类型异常: {type(prices_field)}，值: {prices_field}，预期dict", "price")
+                prices_dict = {}
+            else:
+                prices_dict = {}
+            
+            if isinstance(prices_dict, dict):
+                with_tax_obj = prices_dict.get("withTax")
+                without_tax_obj = prices_dict.get("withoutTax")
+                tax_obj = prices_dict.get("tax")
+                
+                # 安全提取值（支持字典或直接是值）
+                if with_tax_obj is not None:
+                    price_info["prices"]["withTax"] = with_tax_obj.get("value") if isinstance(with_tax_obj, dict) else with_tax_obj
+                if without_tax_obj is not None:
+                    price_info["prices"]["withoutTax"] = without_tax_obj.get("value") if isinstance(without_tax_obj, dict) else without_tax_obj
+                if tax_obj is not None:
+                    price_info["prices"]["tax"] = tax_obj.get("value") if isinstance(tax_obj, dict) else tax_obj
+                
+                # 提取货币代码
+                if isinstance(with_tax_obj, dict):
+                    currency_from_with_tax = with_tax_obj.get("currencyCode")
+                    if currency_from_with_tax:
+                        price_info["prices"]["currencyCode"] = currency_from_with_tax
+                
+                if not price_info["prices"]["currencyCode"]:
+                    price_info["prices"]["currencyCode"] = prices_dict.get("currencyCode", "EUR") if isinstance(prices_dict, dict) else "EUR"
+            elif prices_dict is not None:
+                # 如果prices不是字典，可能是其他类型，记录警告
+                add_log("WARNING", f"购物车summary的prices字段类型异常: {type(prices_dict)}", "price")
+        
+        # 提取每个商品的价格（安全访问）
+        cart_items = []
+        if cart_info and isinstance(cart_info, dict):
+            cart_items = cart_info.get("items", [])
+        elif cart_info is not None:
+            add_log("WARNING", f"购物车info类型异常: {type(cart_info)}，预期dict", "price")
+        
+        for item in cart_items:
+            if not isinstance(item, dict):
+                add_log("WARNING", f"购物车项目类型异常: {type(item)}，预期dict，跳过", "price")
+                continue
+            item_prices = item.get("prices", {})
+            if not isinstance(item_prices, dict):
+                continue
+                
+            # 安全提取价格值（支持字典或直接值）
+            with_tax_obj = item_prices.get("withTax")
+            without_tax_obj = item_prices.get("withoutTax")
+            tax_obj = item_prices.get("tax")
+            
+            # 安全提取价格值（支持字典或直接是值）
+            with_tax_value = None
+            without_tax_value = None
+            tax_value = None
+            currency_code = None
+            
+            if with_tax_obj is not None:
+                with_tax_value = with_tax_obj.get("value") if isinstance(with_tax_obj, dict) else with_tax_obj
+                if isinstance(with_tax_obj, dict):
+                    currency_code = with_tax_obj.get("currencyCode")
+            
+            if without_tax_obj is not None:
+                without_tax_value = without_tax_obj.get("value") if isinstance(without_tax_obj, dict) else without_tax_obj
+            
+            if tax_obj is not None:
+                tax_value = tax_obj.get("value") if isinstance(tax_obj, dict) else tax_obj
+            
+            # 如果没有从withTax中获取货币代码，尝试从item_prices获取
+            if not currency_code:
+                currency_code = item_prices.get("currencyCode") if isinstance(item_prices, dict) else None
+            if not currency_code:
+                currency_code = "EUR"  # 默认值
+            
+            item_price_data = {
+                "itemId": item.get("itemId"),
+                "planCode": item.get("planCode"),
+                "description": item.get("description"),
+                "prices": {
+                    "withTax": with_tax_value,
+                    "withoutTax": without_tax_value,
+                    "tax": tax_value,
+                    "currencyCode": currency_code
+                }
+            }
+            
+            price_info["items"].append(item_price_data)
+        
+        add_log("INFO", f"价格查询成功: 总价含税={price_info['prices']['withTax']} {price_info['prices']['currencyCode']}", "price")
+        
+        # 清理购物车（删除）
+        try:
+            client.delete(f'/order/cart/{cart_id}')
+            add_log("DEBUG", "临时购物车已清理", "price")
+        except Exception as e:
+            add_log("WARNING", f"清理购物车失败（不影响结果）: {str(e)}", "price")
+        
+        return {
+            "success": True,
+            "planCode": plan_code,
+            "datacenter": datacenter,
+            "options": options,
+            "price": price_info
+        }
+        
+    except ovh.exceptions.APIError as api_e:
+        error_msg = str(api_e)
+        # 判断是否是配置不可用的错误
+        if "is not available in" in error_msg:
+            add_log("WARNING", f"配置在指定数据中心不可用: {error_msg}", "price")
+            error_msg = f"该配置在指定数据中心不可用"
+        else:
+            add_log("ERROR", f"查询价格时发生OVH API错误: {error_msg}", "price")
+        
+        # 尝试清理购物车
+        if cart_id:
+            try:
+                client = get_ovh_client()
+                if client:
+                    client.delete(f'/order/cart/{cart_id}')
+            except:
+                pass
+        
+        return {
+            "success": False,
+            "error": error_msg,
+            "price": None
+        }
+    
+    except Exception as e:
+        error_msg = str(e)
+        error_traceback = traceback.format_exc()
+        add_log("ERROR", f"查询价格时发生错误: {error_msg}", "price")
+        add_log("ERROR", f"错误堆栈: {error_traceback}", "price")
+        
+        # 尝试清理购物车
+        if cart_id:
+            try:
+                client = get_ovh_client()
+                if client:
+                    client.delete(f'/order/cart/{cart_id}')
+            except:
+                pass
+        
+        return {
+            "success": False,
+            "error": error_msg,
+            "price": None
+        }
+
+@app.route('/api/servers/<path:plan_code>/price', methods=['OPTIONS', 'POST'])
+def get_server_price(plan_code):
+    """获取配置后的服务器价格（不实际下单）"""
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+    
+    data = request.json or {}
+    datacenter = data.get('datacenter', 'gra')
+    options = data.get('options', [])
+    
+    # 调用内部函数
+    result = _get_server_price_internal(plan_code, datacenter, options)
+    
+    if result.get("success"):
+        return jsonify(result)
+    else:
+        status_code = 401 if "未配置OVH API密钥" in result.get("error", "") else 500
+        return jsonify(result), status_code
 
 @app.route('/api/stats', methods=['GET'])
 def get_stats():

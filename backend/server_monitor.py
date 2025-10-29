@@ -159,7 +159,8 @@ class ServerMonitor:
                         config_info = {
                             "memory": memory,
                             "storage": storage,
-                            "display": config_display
+                            "display": config_display,
+                            "options": config_data.get("options", [])  # 包含API2格式的选项代码
                         }
                         
                         self._check_and_notify_change(subscription, plan_code, dc, status, old_status, config_info, status_key)
@@ -285,6 +286,42 @@ class ServerMonitor:
                         f"└─ 存储: {config_info['storage']}\n"
                     )
                 
+                # 异步获取价格信息（带30秒超时）
+                price_text = None
+                try:
+                    import threading
+                    import queue
+                    price_queue = queue.Queue()
+                    
+                    def fetch_price():
+                        try:
+                            price_result = self._get_price_info(plan_code, datacenter, config_info)
+                            price_queue.put(price_result)
+                        except Exception as e:
+                            self.add_log("WARNING", f"价格获取线程异常: {str(e)}", "monitor")
+                            price_queue.put(None)
+                    
+                    # 启动价格获取线程
+                    price_thread = threading.Thread(target=fetch_price, daemon=True)
+                    price_thread.start()
+                    price_thread.join(timeout=30.0)  # 最多等待30秒
+                    
+                    if price_thread.is_alive():
+                        # 如果线程还在运行，说明超时了
+                        self.add_log("WARNING", f"价格获取超时（30秒），发送不带价格的通知", "monitor")
+                        price_text = None
+                    else:
+                        # 尝试获取结果（如果线程完成）
+                        try:
+                            price_text = price_queue.get_nowait()
+                        except queue.Empty:
+                            price_text = None
+                    
+                    if price_text:
+                        message += f"\n💰 价格: {price_text}\n"
+                except Exception as e:
+                    self.add_log("WARNING", f"价格获取过程异常: {str(e)}，发送不带价格的通知", "monitor")
+                
                 message += (
                     f"状态: {status}\n"
                     f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
@@ -324,6 +361,55 @@ class ServerMonitor:
         except Exception as e:
             self.add_log("ERROR", f"发送提醒时发生异常: {str(e)}", "monitor")
             self.add_log("ERROR", f"错误详情: {traceback.format_exc()}", "monitor")
+    
+    def _get_price_info(self, plan_code, datacenter, config_info=None):
+        """
+        获取配置后的价格信息
+        
+        Args:
+            plan_code: 服务器型号
+            datacenter: 数据中心
+            config_info: 配置信息 {"memory": "xxx", "storage": "xxx", "display": "xxx", "options": [...]}
+        
+        Returns:
+            str: 价格信息文本，如果获取失败返回None
+        """
+        try:
+            # 直接导入并使用内部价格获取函数（避免HTTP调用和认证问题）
+            try:
+                from app import _get_server_price_internal
+            except ImportError:
+                # 如果无法导入（可能是循环导入），跳过价格获取
+                self.add_log("WARNING", f"无法导入价格获取函数，跳过价格显示", "monitor")
+                return None
+            
+            # 提取配置选项
+            options = []
+            
+            if config_info:
+                # 如果config_info中已经有options字段（API2格式），直接使用
+                if 'options' in config_info and config_info['options']:
+                    options = config_info['options']
+            
+            # 直接调用内部函数
+            result = _get_server_price_internal(plan_code, datacenter, options)
+            
+            if result.get("success") and result.get("price"):
+                price_info = result["price"]
+                prices = price_info.get("prices", {})
+                with_tax = prices.get("withTax")
+                currency = prices.get("currencyCode", "EUR")
+                
+                if with_tax is not None:
+                    # 格式化价格
+                    currency_symbol = "€" if currency == "EUR" else "$" if currency == "USD" else currency
+                    return f"{currency_symbol}{with_tax:.2f}/月"
+            
+            return None
+                
+        except Exception as e:
+            self.add_log("WARNING", f"获取价格信息时出错: {str(e)}", "monitor")
+            return None
     
     def check_new_servers(self, current_server_list):
         """

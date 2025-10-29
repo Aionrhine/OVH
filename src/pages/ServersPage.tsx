@@ -14,7 +14,7 @@ import { Progress } from "@/components/ui/progress";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import { Cpu, Database, Wifi, HardDrive, CheckSquare, Square, Settings, ArrowRightLeft, Clock, Bell, Grid, List } from "lucide-react";
+import { Cpu, Database, Wifi, HardDrive, CheckSquare, Square, Settings, ArrowRightLeft, Clock, Bell, Grid, List, Euro, DollarSign, Loader2 } from "lucide-react";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { apiEvents } from "@/context/APIContext";
 import { OVH_DATACENTERS, DatacenterInfo } from "@/config/ovhConstants"; // Import from new location
@@ -113,6 +113,16 @@ const ServersPage = () => {
   const [selectedServer, setSelectedServer] = useState<string | null>(null);
   // 保存每个服务器的选中选项
   const [selectedOptions, setSelectedOptions] = useState<Record<string, string[]>>({});
+  // 保存每个服务器的价格信息（按数据中心存储）
+  const [serverPrices, setServerPrices] = useState<Record<string, Record<string, {
+    loading: boolean;
+    price?: {
+      withTax?: number;
+      withoutTax?: number;
+      currencyCode?: string;
+    };
+    error?: string;
+  }>>>({});
   // 上次更新时间
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   // 标记是否已从缓存加载
@@ -669,6 +679,23 @@ const ServersPage = () => {
         [planCode]: normalizedData
       }));
       
+      // 如果有可用的数据中心，自动查询第一个可用机房的价格
+      const availableDatacenters = Object.entries(normalizedData)
+        .filter(([_, status]) => status && status !== 'unavailable' && status !== 'unknown')
+        .map(([dc, _]) => dc);
+      
+      if (availableDatacenters.length > 0 && isAuthenticated) {
+        const firstAvailableDC = availableDatacenters[0];
+        const selectedOpts = selectedOptions[planCode] || [];
+        const server = servers.find(s => s.planCode === planCode);
+        const finalOptions = selectedOpts.length > 0 
+          ? selectedOpts 
+          : (server?.defaultOptions.map(opt => opt.value) || []);
+        
+        // 异步获取价格，不阻塞UI
+        fetchServerPrice(planCode, finalOptions, firstAvailableDC);
+      }
+      
       toast.success(`已更新 ${planCode} 可用性信息`);
     } catch (error: any) {
       console.error(`Error checking availability for ${planCode}:`, error);
@@ -758,6 +785,85 @@ const ServersPage = () => {
       .map(([dc]) => dc.toLowerCase());
   };
 
+  // 数据中心代码映射：前端显示代码 → OVH API代码
+  // 例如：前端显示 "mum"，但OVH API使用 "ynm"
+  const convertDisplayDcToApiDc = (displayDc: string): string => {
+    const dcMap: Record<string, string> = {
+      'mum': 'ynm',  // 孟买：前端用mum，OVH API用ynm
+      // 可以在这里添加其他映射
+    };
+    return dcMap[displayDc.toLowerCase()] || displayDc.toLowerCase();
+  };
+
+  // 获取服务器价格（按数据中心存储）
+  const fetchServerPrice = async (planCode: string, options: string[] = [], datacenter: string = 'gra') => {
+    if (!isAuthenticated) {
+      // 未认证时清除价格
+      setServerPrices(prev => ({
+        ...prev,
+        [planCode]: {
+          ...(prev[planCode] || {}),
+          [datacenter]: { loading: false, error: '未配置API密钥' }
+        }
+      }));
+      return;
+    }
+
+    setServerPrices(prev => ({
+      ...prev,
+      [planCode]: {
+        ...(prev[planCode] || {}),
+        [datacenter]: { loading: true }
+      }
+    }));
+
+    try {
+      // 将前端显示的数据中心代码转换为OVH API代码
+      const apiDc = convertDisplayDcToApiDc(datacenter);
+      const response = await api.post(`/servers/${planCode}/price`, {
+        datacenter: apiDc,  // 使用转换后的API代码
+        options
+      });
+
+      if (response.data.success && response.data.price) {
+        setServerPrices(prev => ({
+          ...prev,
+          [planCode]: {
+            ...(prev[planCode] || {}),
+            [datacenter]: {
+              loading: false,
+              price: {
+                withTax: response.data.price.prices?.withTax,
+                withoutTax: response.data.price.prices?.withoutTax,
+                currencyCode: response.data.price.prices?.currencyCode || 'EUR'
+              }
+            }
+          }
+        }));
+      } else {
+        setServerPrices(prev => ({
+          ...prev,
+          [planCode]: {
+            ...(prev[planCode] || {}),
+            [datacenter]: { loading: false, error: response.data.error || '获取价格失败' }
+          }
+        }));
+      }
+    } catch (error: any) {
+      console.error(`获取 ${planCode}@${datacenter} 价格失败:`, error);
+      setServerPrices(prev => ({
+        ...prev,
+        [planCode]: {
+          ...(prev[planCode] || {}),
+          [datacenter]: { 
+            loading: false, 
+            error: error.response?.data?.error || '获取价格失败' 
+          }
+        }
+      }));
+    }
+  };
+
   // 切换选项，支持单选逻辑
   const toggleOption = (serverPlanCode: string, optionValue: string, groupName?: string) => {
     setSelectedOptions(prev => {
@@ -817,10 +923,37 @@ const ServersPage = () => {
         currentOptions.push(optionValue);
       }
       
-      return {
+      const newOptions = {
         ...prev,
         [serverPlanCode]: currentOptions
       };
+      
+      // 选项变更后，如果有可用性数据，更新第一个可用机房的价格
+      const server = servers.find(s => s.planCode === serverPlanCode);
+      if (server) {
+        // 确定使用的选项（当前选中的，如果没有则使用默认）
+        const finalOptions = currentOptions.length > 0 
+          ? currentOptions 
+          : server.defaultOptions.map(opt => opt.value);
+        
+        // 如果有可用性数据，使用第一个可用机房
+        const availabilityData = availability[serverPlanCode];
+        if (availabilityData) {
+          const availableDCs = Object.entries(availabilityData)
+            .filter(([_, status]) => status && status !== 'unavailable' && status !== 'unknown')
+            .map(([dc, _]) => dc);
+          
+          if (availableDCs.length > 0) {
+            const datacenter = availableDCs[0];
+            // 延迟调用，避免频繁请求
+            setTimeout(() => {
+              fetchServerPrice(serverPlanCode, finalOptions, datacenter);
+            }, 300);
+          }
+        }
+      }
+      
+      return newOptions;
     });
   };
 
@@ -883,11 +1016,11 @@ const ServersPage = () => {
       console.log("用户选择的配置详情:", formattedOptions);
       console.log("提交的配置选项:", userSelectedOptions);
 
-      // 为每个选中的数据中心创建一个抢购请求
+      // 为每个选中的数据中心创建一个抢购请求（转换数据中心代码）
       const promises = datacenters.map(datacenter => 
         api.post(`/queue`, {
           planCode: server.planCode,
-          datacenter,
+          datacenter: convertDisplayDcToApiDc(datacenter),  // 转换为OVH API代码
           options: userSelectedOptions,
         })
       );
@@ -920,9 +1053,11 @@ const ServersPage = () => {
     }
 
     try {
+      // 转换数据中心代码为OVH API代码
+      const apiDatacenters = datacenters.map(dc => convertDisplayDcToApiDc(dc));
       await api.post('/monitor/subscriptions', {
         planCode: server.planCode,
-        datacenters: datacenters,
+        datacenters: apiDatacenters,  // 转换为OVH API代码
         notifyAvailable: true,
         notifyUnavailable: true
       });
@@ -1098,8 +1233,10 @@ const ServersPage = () => {
         defaultServerOptions[server.planCode] = server.defaultOptions.map(opt => opt.value);
       });
       setSelectedOptions(defaultServerOptions);
+      
+      // 不再在初始化时批量获取价格，改为在检测可用性时按需获取
     }
-  }, [servers]);
+  }, [servers, isAuthenticated]);
 
   // 分类并显示服务器配置选项
   const renderServerOptions = (server: ServerPlan) => {
@@ -1652,6 +1789,84 @@ const ServersPage = () => {
                       )}
                     </div>
                   </div>
+                  {/* 价格显示 - 显示第一个可用机房的价格 */}
+                  {(() => {
+                    if (!isAuthenticated) return null;
+                    
+                    // 获取第一个可用机房的价格
+                    const availabilityData = availability[server.planCode];
+                    let priceInfo = null;
+                    let datacenterCode = '';
+                    
+                    if (availabilityData) {
+                      const availableDCs = Object.entries(availabilityData)
+                        .filter(([_, status]) => status && status !== 'unavailable' && status !== 'unknown')
+                        .map(([dc, _]) => dc);
+                      
+                      if (availableDCs.length > 0) {
+                        datacenterCode = availableDCs[0];
+                        priceInfo = serverPrices[server.planCode]?.[datacenterCode];
+                      }
+                    }
+                    
+                    // 如果没有可用性数据，尝试从已存在的价格数据中取第一个
+                    if (!priceInfo && serverPrices[server.planCode]) {
+                      const firstDC = Object.keys(serverPrices[server.planCode])[0];
+                      if (firstDC) {
+                        priceInfo = serverPrices[server.planCode][firstDC];
+                        datacenterCode = firstDC;
+                      }
+                    }
+                    
+                    if (!priceInfo) return null;
+                    
+                    if (priceInfo.loading) {
+                      return (
+                        <div className="mt-2 flex items-center gap-1.5 text-xs text-cyber-muted">
+                          <Loader2 size={12} className="animate-spin" />
+                          <span>正在获取价格{datacenterCode ? ` (${datacenterCode.toUpperCase()})` : ''}...</span>
+                        </div>
+                      );
+                    }
+                    
+                    if (priceInfo.error) {
+                      return (
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <div className="mt-2 text-xs text-yellow-400 cursor-help">
+                              {priceInfo.error}{datacenterCode ? ` (${datacenterCode.toUpperCase()})` : ''}
+                            </div>
+                          </TooltipTrigger>
+                          <TooltipContent>
+                            <p>价格获取失败，可能该配置在所选数据中心不可用</p>
+                          </TooltipContent>
+                        </Tooltip>
+                      );
+                    }
+                    
+                    if (priceInfo.price?.withTax) {
+                      const currencySymbol = priceInfo.price.currencyCode === 'EUR' ? '€' : 
+                                           priceInfo.price.currencyCode === 'USD' ? '$' : 
+                                           priceInfo.price.currencyCode || '€';
+                      return (
+                        <div className="mt-2 flex items-center gap-2">
+                          <div className="flex items-center gap-1.5 px-2 py-1 bg-green-500/20 border border-green-500/30 rounded text-xs">
+                            {priceInfo.price.currencyCode === 'EUR' ? <Euro size={12} className="text-green-400" /> : 
+                             priceInfo.price.currencyCode === 'USD' ? <DollarSign size={12} className="text-green-400" /> : null}
+                            <span className="font-bold text-green-400">
+                              {currencySymbol}{priceInfo.price.withTax.toFixed(2)}
+                            </span>
+                            <span className="text-cyber-muted text-[10px]">/月</span>
+                            {datacenterCode && (
+                              <span className="text-cyber-muted text-[9px] ml-1">({datacenterCode.toUpperCase()})</span>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    }
+                    
+                    return null;
+                  })()}
                 </CardHeader>
                 
                 <CardContent className="p-2 sm:p-3">
@@ -1896,6 +2111,84 @@ const ServersPage = () => {
                         )}
                       </div>
                       <div className="text-xs text-cyber-muted leading-normal line-clamp-2" title={server.name}>{server.name}</div>
+                      {/* 价格显示 - 显示第一个可用机房的价格 */}
+                      {(() => {
+                        if (!isAuthenticated) return null;
+                        
+                        // 获取第一个可用机房的价格
+                        const availabilityData = availability[server.planCode];
+                        let priceInfo = null;
+                        let datacenterCode = '';
+                        
+                        if (availabilityData) {
+                          const availableDCs = Object.entries(availabilityData)
+                            .filter(([_, status]) => status && status !== 'unavailable' && status !== 'unknown')
+                            .map(([dc, _]) => dc);
+                          
+                          if (availableDCs.length > 0) {
+                            datacenterCode = availableDCs[0];
+                            priceInfo = serverPrices[server.planCode]?.[datacenterCode];
+                          }
+                        }
+                        
+                        // 如果没有可用性数据，尝试从已存在的价格数据中取第一个
+                        if (!priceInfo && serverPrices[server.planCode]) {
+                          const firstDC = Object.keys(serverPrices[server.planCode])[0];
+                          if (firstDC) {
+                            priceInfo = serverPrices[server.planCode][firstDC];
+                            datacenterCode = firstDC;
+                          }
+                        }
+                        
+                        if (!priceInfo) return null;
+                        
+                        if (priceInfo.loading) {
+                          return (
+                            <div className="mt-1 flex items-center gap-1.5 text-[10px] text-cyber-muted">
+                              <Loader2 size={10} className="animate-spin" />
+                              <span>获取价格中{datacenterCode ? ` (${datacenterCode.toUpperCase()})` : ''}...</span>
+                            </div>
+                          );
+                        }
+                        
+                        if (priceInfo.error) {
+                          return (
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <div className="mt-1 text-[10px] text-yellow-400 cursor-help">
+                                  {priceInfo.error}{datacenterCode ? ` (${datacenterCode.toUpperCase()})` : ''}
+                                </div>
+                              </TooltipTrigger>
+                              <TooltipContent>
+                                <p>价格获取失败，可能该配置在所选数据中心不可用</p>
+                              </TooltipContent>
+                            </Tooltip>
+                          );
+                        }
+                        
+                        if (priceInfo.price?.withTax) {
+                          const currencySymbol = priceInfo.price.currencyCode === 'EUR' ? '€' : 
+                                               priceInfo.price.currencyCode === 'USD' ? '$' : 
+                                               priceInfo.price.currencyCode || '€';
+                          return (
+                            <div className="mt-1.5 flex items-center gap-1.5">
+                              <div className="flex items-center gap-1 px-2 py-0.5 bg-green-500/20 border border-green-500/30 rounded text-[10px]">
+                                {priceInfo.price.currencyCode === 'EUR' ? <Euro size={10} className="text-green-400" /> : 
+                                 priceInfo.price.currencyCode === 'USD' ? <DollarSign size={10} className="text-green-400" /> : null}
+                                <span className="font-bold text-green-400">
+                                  {currencySymbol}{priceInfo.price.withTax.toFixed(2)}
+                                </span>
+                                <span className="text-cyber-muted text-[9px]">/月</span>
+                                {datacenterCode && (
+                                  <span className="text-cyber-muted text-[8px] ml-0.5">({datacenterCode.toUpperCase()})</span>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        }
+                        
+                        return null;
+                      })()}
                     </div>
 
                     {/* 服务器规格 - 优化间距和对齐 */}
