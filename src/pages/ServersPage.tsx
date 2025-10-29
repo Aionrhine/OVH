@@ -13,6 +13,7 @@ import {
 import { Progress } from "@/components/ui/progress";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Cpu, Database, Wifi, HardDrive, CheckSquare, Square, Settings, ArrowRightLeft, Clock, Bell, Grid, List } from "lucide-react";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { apiEvents } from "@/context/APIContext";
@@ -1873,134 +1874,187 @@ const ServersPage = () => {
         
         {/* 列表视图 - 移动端不显示 */}
         {!isMobile && viewMode === 'list' && (
-          <div className="space-y-3">
+          <div className="space-y-4">
             {filteredServers.map((server) => (
               <div
                 key={server.planCode}
-                className="bg-cyber-grid/10 border border-cyber-accent/30 rounded-md overflow-hidden w-full"
+                className="bg-cyber-grid/10 border border-cyber-accent/30 rounded-lg overflow-hidden w-full shadow-sm hover:shadow-md transition-shadow"
               >
-                <div className="flex items-center gap-4 p-4">
-                  {/* 服务器型号 */}
-                  <div className="flex-shrink-0 w-32">
-                    <div className="flex items-center gap-2">
-                      <div className="font-bold text-cyber-accent">{server.planCode}</div>
-                      {subscribedServers.has(server.planCode) && (
-                        <span className="relative inline-flex items-center justify-center w-7 h-7 rounded-lg bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 hover:-translate-y-0.5 transition-all duration-200" title="已订阅监控">
-                          <Bell size={14} className="text-white" />
-                        </span>
-                      )}
+                <div className="p-4">
+                  {/* 第一行：服务器信息和规格 */}
+                  <div className="flex items-center gap-4 mb-3">
+                    {/* 服务器型号 */}
+                    <div className="flex-shrink-0 w-36 lg:w-40">
+                      <div className="flex items-center gap-2 mb-1">
+                        <div className="font-bold text-base text-cyber-accent truncate">{server.planCode}</div>
+                        {subscribedServers.has(server.planCode) && (
+                          <span className="relative inline-flex items-center justify-center w-7 h-7 rounded-lg bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 hover:-translate-y-0.5 transition-all duration-200 flex-shrink-0" title="已订阅监控">
+                            <Bell size={14} className="text-white" />
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-xs text-cyber-muted leading-normal line-clamp-1">{server.name}</div>
                     </div>
-                    <div className="text-xs text-cyber-muted mt-0.5">{server.name}</div>
+
+                    {/* 服务器规格 - 紧凑水平排列，禁止带宽单独换行 */}
+                    <TooltipProvider delayDuration={200}>
+                      <div className="flex-1 flex gap-2 min-w-0 items-center">
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <div className="flex items-center gap-1.5 px-2 py-1.5 rounded bg-cyber-grid/20 border border-cyber-accent/10 cursor-help hover:bg-cyber-grid/30 hover:border-cyber-accent/20 transition-all flex-shrink-0">
+                              <Cpu size={13} className="text-cyber-accent flex-shrink-0" />
+                              <div className="min-w-0">
+                                <div className="text-[10px] text-cyber-muted leading-tight">CPU</div>
+                                <div className="text-xs font-medium text-cyber-text truncate leading-tight" title={formatServerSpec(server.cpu, "CPU")}>
+                                  {formatServerSpec(server.cpu, "CPU")}
+                                </div>
+                              </div>
+                            </div>
+                          </TooltipTrigger>
+                          <TooltipContent side="top" className="max-w-xs z-[9999]">
+                            <p className="text-sm whitespace-normal break-words">{formatServerSpec(server.cpu, "CPU")}</p>
+                          </TooltipContent>
+                        </Tooltip>
+                        
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <div className="flex items-center gap-1.5 px-2 py-1.5 rounded bg-cyber-grid/20 border border-cyber-accent/10 cursor-help hover:bg-cyber-grid/30 hover:border-cyber-accent/20 transition-all flex-shrink-0">
+                              <Database size={13} className="text-cyber-accent flex-shrink-0" />
+                              <div className="min-w-0">
+                                <div className="text-[10px] text-cyber-muted leading-tight">内存</div>
+                                <div className="text-xs font-medium text-cyber-text truncate leading-tight" title={formatServerSpec(server.memory, "内存")}>
+                                  {formatServerSpec(server.memory, "内存")}
+                                </div>
+                              </div>
+                            </div>
+                          </TooltipTrigger>
+                          <TooltipContent side="top" className="max-w-xs z-[9999]">
+                            <p className="text-sm whitespace-normal break-words">{formatServerSpec(server.memory, "内存")}</p>
+                          </TooltipContent>
+                        </Tooltip>
+                        
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <div className="flex items-center gap-1.5 px-2 py-1.5 rounded bg-cyber-grid/20 border border-cyber-accent/10 cursor-help hover:bg-cyber-grid/30 hover:border-cyber-accent/20 transition-all flex-shrink-0">
+                              <HardDrive size={13} className="text-cyber-accent flex-shrink-0" />
+                              <div className="min-w-0">
+                                <div className="text-[10px] text-cyber-muted leading-tight">存储</div>
+                                <div className="text-xs font-medium text-cyber-text truncate leading-tight" title={formatServerSpec(server.storage, "存储")}>
+                                  {formatServerSpec(server.storage, "存储")}
+                                </div>
+                              </div>
+                            </div>
+                          </TooltipTrigger>
+                          <TooltipContent side="top" className="max-w-xs z-[9999]">
+                            <p className="text-sm whitespace-normal break-words">{formatServerSpec(server.storage, "存储")}</p>
+                          </TooltipContent>
+                        </Tooltip>
+                        
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <div className="flex items-center gap-1.5 px-2 py-1.5 rounded bg-cyber-grid/20 border border-cyber-accent/10 cursor-help hover:bg-cyber-grid/30 hover:border-cyber-accent/20 transition-all flex-shrink-0">
+                              <Wifi size={13} className="text-cyber-accent flex-shrink-0" />
+                              <div className="min-w-0">
+                                <div className="text-[10px] text-cyber-muted leading-tight">带宽</div>
+                                <div className="text-xs font-medium text-cyber-text truncate leading-tight" title={formatServerSpec(server.bandwidth, "带宽")}>
+                                  {formatServerSpec(server.bandwidth, "带宽")}
+                                </div>
+                              </div>
+                            </div>
+                          </TooltipTrigger>
+                          <TooltipContent side="top" className="max-w-xs z-[9999]">
+                            <p className="text-sm whitespace-normal break-words">{formatServerSpec(server.bandwidth, "带宽")}</p>
+                          </TooltipContent>
+                        </Tooltip>
+                        
+                        {server.vrackBandwidth && server.vrackBandwidth !== "N/A" && (
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <div className="flex items-center gap-1.5 px-2 py-1.5 rounded bg-cyber-grid/20 border border-cyber-accent/10 cursor-help hover:bg-cyber-grid/30 hover:border-cyber-accent/20 transition-all flex-shrink-0">
+                                <ArrowRightLeft size={13} className="text-cyber-accent flex-shrink-0" />
+                                <div className="min-w-0">
+                                  <div className="text-[10px] text-cyber-muted leading-tight">内网</div>
+                                  <div className="text-xs font-medium text-cyber-text truncate leading-tight" title={formatServerSpec(server.vrackBandwidth, "内网带宽")}>
+                                    {formatServerSpec(server.vrackBandwidth, "内网带宽")}
+                                  </div>
+                                </div>
+                              </div>
+                            </TooltipTrigger>
+                            <TooltipContent side="top" className="max-w-xs z-[9999]">
+                              <p className="text-sm whitespace-normal break-words">{formatServerSpec(server.vrackBandwidth, "内网带宽")}</p>
+                            </TooltipContent>
+                          </Tooltip>
+                        )}
+                      </div>
+                    </TooltipProvider>
                   </div>
 
-                  {/* 服务器规格 */}
-                  <div className="flex-1 grid gap-3 grid-cols-4 lg:grid-cols-5">
-                    <div className="flex items-center gap-2">
-                      <Cpu size={14} className="text-cyber-accent flex-shrink-0" />
-                      <div className="min-w-0">
-                        <div className="text-[10px] text-cyber-muted">CPU</div>
-                        <div className="text-xs font-medium truncate">{formatServerSpec(server.cpu, "CPU")}</div>
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <Database size={14} className="text-cyber-accent flex-shrink-0" />
-                      <div className="min-w-0">
-                        <div className="text-[10px] text-cyber-muted">内存</div>
-                        <div className="text-xs font-medium truncate">{formatServerSpec(server.memory, "内存")}</div>
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <HardDrive size={14} className="text-cyber-accent flex-shrink-0" />
-                      <div className="min-w-0">
-                        <div className="text-[10px] text-cyber-muted">存储</div>
-                        <div className="text-xs font-medium truncate">{formatServerSpec(server.storage, "存储")}</div>
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <Wifi size={14} className="text-cyber-accent flex-shrink-0" />
-                      <div className="min-w-0">
-                        <div className="text-[10px] text-cyber-muted">带宽</div>
-                        <div className="text-xs font-medium truncate">{formatServerSpec(server.bandwidth, "带宽")}</div>
-                      </div>
-                    </div>
-                    {server.vrackBandwidth && server.vrackBandwidth !== "N/A" && (
-                      <div className="flex items-center gap-2">
-                        <ArrowRightLeft size={14} className="text-cyber-accent flex-shrink-0" />
-                        <div className="min-w-0">
-                          <div className="text-[10px] text-cyber-muted">内网</div>
-                          <div className="text-xs font-medium truncate">{formatServerSpec(server.vrackBandwidth, "内网带宽")}</div>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-
-                  {/* 操作按钮 */}
-                  <div className="flex-shrink-0 flex flex-wrap gap-2">
-                    <button
-                      onClick={() => checkAvailability(server.planCode)}
-                      disabled={isCheckingAvailability || !isAuthenticated}
-                      className="px-3 py-1.5 bg-cyber-accent/10 hover:bg-cyber-accent/20 text-cyber-accent border border-cyber-accent/30 rounded text-xs disabled:opacity-50"
-                      title="检查可用性"
-                    >
-                      检查
-                    </button>
-                    <button
-                      onClick={() => {
-                        const selectedDcs = getSelectedDatacentersList(server.planCode);
-                        addToMonitor(server, selectedDcs);
-                      }}
-                      disabled={!isAuthenticated}
-                      className="px-3 py-1.5 bg-blue-500/20 hover:bg-blue-500/30 text-blue-400 border border-blue-500/40 rounded text-xs disabled:opacity-50"
-                      title="添加到监控"
-                    >
-                      <Bell size={14} />
-                    </button>
-                    <button
-                      onClick={() => {
-                        const selectedDcs = getSelectedDatacentersList(server.planCode);
-                        if (selectedDcs.length > 0) {
-                          addToQueue(server, selectedDcs);
-                        } else {
-                          toast.error("请至少选择一个数据中心");
-                        }
-                      }}
-                      disabled={!isAuthenticated || getSelectedDatacentersList(server.planCode).length === 0}
-                      className={`px-4 py-2 rounded text-xs font-extrabold shadow-md transition-all duration-200 tracking-wider border ${
-                        !isAuthenticated || getSelectedDatacentersList(server.planCode).length === 0
-                          ? 'bg-gradient-to-r from-slate-600 to-slate-700 text-slate-300 border-slate-500/50 cursor-not-allowed'
-                          : 'bg-gradient-to-r from-blue-500 to-blue-600 hover:from-blue-600 hover:to-blue-700 text-white border-blue-400/50 hover:border-blue-300 hover:shadow-lg hover:shadow-blue-500/40'
-                      }`}
-                      style={{ textShadow: '0 1px 2px rgba(0, 0, 0, 0.3)' }}
-                      title={
-                        !isAuthenticated 
-                          ? "请先配置API设置" 
-                          : getSelectedDatacentersList(server.planCode).length === 0 
-                            ? "请先选择数据中心" 
-                            : "一键抢购"
-                      }
-                    >
-                      🛒 抢购
-                    </button>
-                  </div>
-                </div>
-
-                {/* 数据中心选择（固定显示） */}
-                <div className="border-t border-cyber-accent/20 p-3 bg-cyber-grid/5">
+                  {/* 数据中心选择（固定显示） */}
+                  <div className="border-t border-cyber-accent/20 pt-3 mt-3">
                     <div className="flex items-center justify-between mb-2">
-                      <span className="text-xs text-cyber-muted">数据中心选择：</span>
-                      <div className="flex gap-1.5">
+                      <span className="text-xs font-medium text-cyber-text">数据中心选择</span>
+                      <div className="flex items-center gap-2">
+                        {/* 操作按钮 - 与全选取消放同一行 */}
                         <button
-                          onClick={() => toggleAllDatacenters(server.planCode, true)}
-                          className="px-2 py-0.5 bg-cyber-accent/10 hover:bg-cyber-accent/20 text-cyber-accent border border-cyber-accent/30 rounded text-[10px]"
+                          onClick={() => checkAvailability(server.planCode)}
+                          disabled={isCheckingAvailability || !isAuthenticated}
+                          className="px-3 py-1.5 bg-cyber-accent/10 hover:bg-cyber-accent/20 text-cyber-accent border border-cyber-accent/30 rounded text-xs font-medium disabled:opacity-50 transition-all"
+                          title="检查可用性"
                         >
-                          全选
+                          检查
                         </button>
                         <button
-                          onClick={() => toggleAllDatacenters(server.planCode, false)}
-                          className="px-2 py-0.5 bg-cyber-grid/10 hover:bg-cyber-grid/20 text-cyber-muted border border-cyber-accent/20 rounded text-[10px]"
+                          onClick={() => {
+                            const selectedDcs = getSelectedDatacentersList(server.planCode);
+                            addToMonitor(server, selectedDcs);
+                          }}
+                          disabled={!isAuthenticated}
+                          className="px-3 py-1.5 bg-blue-500/20 hover:bg-blue-500/30 text-blue-400 border border-blue-500/40 rounded text-xs font-medium disabled:opacity-50 transition-all"
+                          title="添加到监控"
                         >
-                          取消
+                          <Bell size={14} />
                         </button>
+                        <button
+                          onClick={() => {
+                            const selectedDcs = getSelectedDatacentersList(server.planCode);
+                            if (selectedDcs.length > 0) {
+                              addToQueue(server, selectedDcs);
+                            } else {
+                              toast.error("请至少选择一个数据中心");
+                            }
+                          }}
+                          disabled={!isAuthenticated || getSelectedDatacentersList(server.planCode).length === 0}
+                          className={`px-4 py-1.5 rounded text-xs font-bold shadow-sm transition-all border ${
+                            !isAuthenticated || getSelectedDatacentersList(server.planCode).length === 0
+                              ? 'bg-gradient-to-r from-slate-600 to-slate-700 text-slate-300 border-slate-500/50 cursor-not-allowed'
+                              : 'bg-gradient-to-r from-blue-500 to-blue-600 hover:from-blue-600 hover:to-blue-700 text-white border-blue-400/50 hover:border-blue-300'
+                          }`}
+                          title={
+                            !isAuthenticated 
+                              ? "请先配置API设置" 
+                              : getSelectedDatacentersList(server.planCode).length === 0 
+                                ? "请先选择数据中心" 
+                                : "一键抢购"
+                          }
+                        >
+                          🛒 抢购
+                        </button>
+                        
+                        {/* 数据中心控制按钮 */}
+                        <div className="ml-2 pl-2 border-l border-cyber-accent/20">
+                          <button
+                            onClick={() => toggleAllDatacenters(server.planCode, true)}
+                            className="px-2 py-1 bg-cyber-accent/10 hover:bg-cyber-accent/20 text-cyber-accent border border-cyber-accent/30 rounded text-[10px] font-medium transition-all"
+                          >
+                            全选
+                          </button>
+                          <button
+                            onClick={() => toggleAllDatacenters(server.planCode, false)}
+                            className="px-2 py-1 ml-1.5 bg-cyber-grid/10 hover:bg-cyber-grid/20 text-cyber-muted border border-cyber-accent/20 rounded text-[10px] font-medium transition-all"
+                          >
+                            取消
+                          </button>
+                        </div>
                       </div>
                     </div>
                     <div className="grid grid-cols-4 gap-2">
@@ -2021,16 +2075,16 @@ const ServersPage = () => {
                             <div
                               key={dcCode}
                               onClick={() => toggleDatacenterSelection(server.planCode, dcCode)}
-                              className={`px-2 py-1 rounded cursor-pointer text-xs flex items-center justify-between ${
+                              className={`px-2 py-1.5 rounded cursor-pointer text-xs flex items-center justify-between transition-all ${
                                 isSelected
                                   ? 'bg-cyber-accent/20 border-cyber-accent text-cyber-accent'
-                                  : 'bg-slate-800/60 border-slate-700 hover:bg-slate-700/60 text-slate-300'
-                              } border`}
+                                  : 'bg-slate-800/60 border-slate-700 hover:bg-slate-700/60 text-slate-300 hover:border-slate-600'
+                              } border font-medium`}
                             >
-                              <span className="font-medium">{dcCode}</span>
+                              <span>{dcCode}</span>
                               {availStatus !== "unknown" && (
-                                <span className={`text-[10px] ${
-                                  availStatus === "unavailable" ? 'text-red-500' : 'text-green-400'
+                                <span className={`text-xs font-semibold ${
+                                  availStatus === "unavailable" ? 'text-red-400' : 'text-green-400'
                                 }`}>
                                   {availStatus === "unavailable" ? '无' : '有'}
                                 </span>
@@ -2040,6 +2094,7 @@ const ServersPage = () => {
                         })}
                     </div>
                   </div>
+                </div>
               </div>
             ))}
           </div>
