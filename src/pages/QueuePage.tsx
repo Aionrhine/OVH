@@ -63,6 +63,7 @@ const QueuePage = () => {
   const [quantity, setQuantity] = useState<number>(1); // 每个数据中心的抢购数量
   const [selectedOptions, setSelectedOptions] = useState<string[]>([]); // 选中的可选配置
   const [optionsInput, setOptionsInput] = useState<string>(''); // 用户自定义输入
+  const [showClearConfirm, setShowClearConfirm] = useState(false); // 清空确认对话框
 
   // Fetch queue items
   const fetchQueueItems = async () => {
@@ -195,17 +196,15 @@ const QueuePage = () => {
 
   // Clear all queue items
   const clearAllQueue = async () => {
-    if (!window.confirm('确定要清空所有队列吗？此操作不可撤销。')) {
-      return;
-    }
-    
     try {
       const response = await api.delete(`/queue/clear`);
       toast.success(`已清空队列（共 ${response.data.count} 项）`);
       fetchQueueItems();
+      setShowClearConfirm(false);
     } catch (error) {
       console.error("Error clearing queue:", error);
       toast.error("清空队列失败");
+      setShowClearConfirm(false);
     }
   };
 
@@ -286,26 +285,24 @@ const QueuePage = () => {
       </div>
 
       {/* Controls */}
-      <div className="flex flex-col sm:flex-row justify-between items-stretch sm:items-center gap-3 sm:gap-0 mb-4 sm:mb-6">
-        <div className="flex gap-2">
-          <button
-            onClick={() => fetchQueueItems()}
-            className="cyber-button text-xs flex items-center flex-1 sm:flex-initial justify-center"
-            disabled={isLoading}
-          >
-            <RefreshCwIcon size={12} className="mr-1" />
-            刷新
-          </button>
-          <button
-            onClick={clearAllQueue}
-            className="cyber-button text-xs flex items-center bg-red-500/20 hover:bg-red-500/30 text-red-400 border-red-500/30 flex-1 sm:flex-initial justify-center disabled:opacity-50 disabled:cursor-not-allowed"
-            disabled={isLoading || queueItems.length === 0}
-          >
-            <Trash2Icon size={12} className="mr-1" />
-            {!isMobile && '清空队列'}
-            {isMobile && '清空'}
-          </button>
-        </div>
+      <div className="flex flex-col sm:flex-row justify-between items-stretch sm:items-center gap-3 mb-4 sm:mb-6">
+        <button
+          onClick={() => fetchQueueItems()}
+          className="cyber-button text-xs flex items-center justify-center"
+          disabled={isLoading}
+        >
+          <RefreshCwIcon size={12} className="mr-1" />
+          刷新
+        </button>
+        <button
+          onClick={() => setShowClearConfirm(true)}
+          className="cyber-button text-xs flex items-center bg-red-500/20 hover:bg-red-500/30 text-red-400 border-red-500/30 justify-center disabled:opacity-50 disabled:cursor-not-allowed"
+          disabled={isLoading || queueItems.length === 0}
+        >
+          <Trash2Icon size={12} className="mr-1" />
+          {!isMobile && '清空队列'}
+          {isMobile && '清空'}
+        </button>
       </div>
 
       {/* Add Form */}
@@ -579,6 +576,38 @@ const QueuePage = () => {
             ))}
         </div>
       </div>
+      
+      {/* 确认清空对话框 */}
+      {showClearConfirm && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50" onClick={() => setShowClearConfirm(false)}>
+          <motion.div 
+            initial={{ opacity: 0, scale: 0.9 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="bg-cyber-surface-dark border border-cyber-border rounded-lg p-6 max-w-md mx-4 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="text-lg font-bold text-cyber-primary-accent mb-3">⚠️ 确认清空</h3>
+            <p className="text-cyber-text mb-6">
+              确定要清空所有队列任务吗？<br />
+              <span className="text-red-400 text-sm">此操作不可撤销。</span>
+            </p>
+            <div className="flex gap-3 justify-end">
+              <button
+                onClick={() => setShowClearConfirm(false)}
+                className="cyber-button px-4 py-2 bg-cyber-surface hover:bg-cyber-hover text-cyber-text"
+              >
+                取消
+              </button>
+              <button
+                onClick={clearAllQueue}
+                className="cyber-button px-4 py-2 bg-red-500/20 hover:bg-red-500/30 text-red-400 border-red-500/50"
+              >
+                确认清空
+              </button>
+            </div>
+          </motion.div>
+        </div>
+      )}
     </div>
   );
 };
