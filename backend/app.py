@@ -2969,9 +2969,181 @@ def telegram_webhook():
                 add_log("WARNING", f"未知的action: {action}", "telegram")
                 return jsonify({"ok": False, "error": f"Unknown action: {action}"}), 400
         
-        # 处理普通消息（可选，暂时忽略）
+        # 处理普通消息（自动下单功能）
         elif data.get("message"):
-            add_log("DEBUG", "收到Telegram普通消息，暂时忽略", "telegram")
+            message_obj = data["message"]
+            text = message_obj.get("text", "").strip()
+            chat_id = message_obj.get("chat", {}).get("id")
+            from_user = message_obj.get("from", {})
+            user_id = from_user.get("id")
+            
+            # 获取 Telegram Token
+            tg_token = config.get("tgToken")
+            
+            add_log("INFO", f"收到Telegram普通消息: user_id={user_id}, text={text[:100]}", "telegram")
+            
+            # 解析消息格式：支持 "24sk202 rbx 1" 或 "24sk202 rbx" 或 "24sk202 1" 或 "24sk202"
+            # 格式：planCode [datacenter] [quantity]
+            import re
+            # 匹配最多三个参数：planCode, datacenter(可选), quantity(可选)
+            pattern = r'^(\S+)(?:\s+(\S+))?(?:\s+(\S+))?$'
+            match = re.match(pattern, text)
+            
+            if not match:
+                add_log("WARNING", f"消息格式不正确: {text}", "telegram")
+                # 发送提示消息
+                if tg_token and chat_id:
+                    help_message = "❌ 消息格式不正确\n\n正确格式：\n• 24sk202 rbx 1 - 下单指定机房的所有可用配置，数量为1\n• 24sk202 rbx - 下单指定机房的所有可用配置，默认数量为1\n• 24sk202 1 - 下单所有可用机房和配置，数量为1\n• 24sk202 - 下单所有可用机房和配置，默认数量为1"
+                    requests.post(f"https://api.telegram.org/bot{tg_token}/sendMessage", json={
+                        "chat_id": chat_id,
+                        "text": help_message
+                    }, timeout=5)
+                return jsonify({"ok": True})
+            
+            plan_code = match.group(1)
+            param2 = match.group(2) if match.group(2) else None
+            param3 = match.group(3) if match.group(3) else None
+            
+            # 解析参数：判断是机房还是数量
+            datacenter = None
+            quantity = 1  # 默认数量为1
+            
+            if param2:
+                if param2.isdigit():
+                    # 第二个参数是数字，表示数量（所有机房）
+                    quantity = int(param2)
+                else:
+                    # 第二个参数是机房代码
+                    datacenter = param2.lower()
+                    # 如果有第三个参数，应该是数量
+                    if param3:
+                        if param3.isdigit():
+                            quantity = int(param3)
+                        else:
+                            # 第三个参数不是数字，格式错误
+                            add_log("WARNING", f"消息格式不正确: 第三个参数应该是数字（数量），但收到: {param3}", "telegram")
+                            if tg_token and chat_id:
+                                help_message = "❌ 消息格式不正确\n\n第三个参数应该是数字（数量）\n正确格式：\n• 24sk202 rbx 1 - 下单指定机房的所有可用配置，数量为1"
+                                requests.post(f"https://api.telegram.org/bot{tg_token}/sendMessage", json={
+                                    "chat_id": chat_id,
+                                    "text": help_message
+                                }, timeout=5)
+                            return jsonify({"ok": True})
+            
+            add_log("INFO", f"解析结果: plan_code={plan_code}, datacenter={datacenter}, quantity={quantity}", "telegram")
+            
+            # 查询可用配置
+            try:
+                # 使用现有的函数获取所有配置组合的可用性（包含正确的 options）
+                # 该函数内部会处理 OVH 客户端连接
+                configs_data = check_server_availability_with_configs(plan_code)
+                
+                if not configs_data or len(configs_data) == 0:
+                    error_msg = f"未找到 {plan_code} 的可用配置"
+                    add_log("WARNING", error_msg, "telegram")
+                    if tg_token and chat_id:
+                        requests.post(f"https://api.telegram.org/bot{tg_token}/sendMessage", json={
+                            "chat_id": chat_id,
+                            "text": f"❌ {error_msg}"
+                        }, timeout=5)
+                    return jsonify({"ok": True})
+                
+                # 收集所有可用的配置和机房组合
+                available_configs = []
+                seen_configs = set()
+                
+                for config_key, config_data in configs_data.items():
+                    memory = config_data.get("memory", "N/A")
+                    storage = config_data.get("storage", "N/A")
+                    options = config_data.get("options", [])  # 从函数返回的结果中获取 options
+                    datacenters = config_data.get("datacenters", {})
+                    
+                    # 检查每个机房的可用性
+                    for dc, availability in datacenters.items():
+                        dc_lower = dc.lower()
+                        
+                        # 如果指定了机房，只处理该机房
+                        if datacenter and dc_lower != datacenter:
+                            continue
+                        
+                        # 只处理有货的配置
+                        if availability not in ["unavailable", "unknown"]:
+                            config_dc_key = (config_key, dc_lower)
+                            if config_dc_key not in seen_configs:
+                                seen_configs.add(config_dc_key)
+                                available_configs.append({
+                                    "planCode": plan_code,
+                                    "datacenter": dc_lower,
+                                    "options": options,  # 使用从函数获取的 options
+                                    "memory": memory,
+                                    "storage": storage
+                                })
+                
+                if not available_configs:
+                    error_msg = f"❌ {plan_code} 当前没有可用配置"
+                    if datacenter:
+                        error_msg += f"（机房: {datacenter.upper()}）"
+                    add_log("WARNING", error_msg, "telegram")
+                    if tg_token and chat_id:
+                        requests.post(f"https://api.telegram.org/bot{tg_token}/sendMessage", json={
+                            "chat_id": chat_id,
+                            "text": error_msg
+                        }, timeout=5)
+                    return jsonify({"ok": True})
+                
+                # 添加到队列（每个配置和机房组合，按数量添加）
+                added_count = 0
+                for config_info in available_configs:
+                    for _ in range(quantity):
+                        queue_item = {
+                            "id": str(uuid.uuid4()),
+                            "planCode": config_info["planCode"],
+                            "datacenter": config_info["datacenter"],
+                            "options": config_info["options"],
+                            "status": "running",
+                            "createdAt": datetime.now().isoformat(),
+                            "updatedAt": datetime.now().isoformat(),
+                            "retryInterval": 30,
+                            "retryCount": 0,
+                            "lastCheckTime": 0,
+                            "fromTelegram": True
+                        }
+                        queue.append(queue_item)
+                        added_count += 1
+                
+                save_data()
+                update_stats()
+                
+                # 发送成功消息
+                success_msg = f"✅ 已添加 {added_count} 个任务到抢购队列\n\n"
+                success_msg += f"型号: {plan_code}\n"
+                if datacenter:
+                    success_msg += f"机房: {datacenter.upper()}\n"
+                else:
+                    success_msg += f"机房: 所有可用机房\n"
+                success_msg += f"数量: {quantity} 个/配置\n"
+                success_msg += f"配置数: {len(available_configs)} 个\n\n"
+                success_msg += "系统将自动尝试下单。"
+                
+                add_log("INFO", f"Telegram用户 {user_id} 通过消息添加了 {added_count} 个任务到队列", "telegram")
+                
+                if tg_token and chat_id:
+                    requests.post(f"https://api.telegram.org/bot{tg_token}/sendMessage", json={
+                        "chat_id": chat_id,
+                        "text": success_msg
+                    }, timeout=5)
+                
+            except Exception as e:
+                error_msg = f"处理消息时出错: {str(e)}"
+                add_log("ERROR", error_msg, "telegram")
+                import traceback
+                add_log("ERROR", f"错误详情: {traceback.format_exc()}", "telegram")
+                if tg_token and chat_id:
+                    requests.post(f"https://api.telegram.org/bot{tg_token}/sendMessage", json={
+                        "chat_id": chat_id,
+                        "text": f"❌ {error_msg}"
+                    }, timeout=5)
+            
             return jsonify({"ok": True})
         
         return jsonify({"ok": True})
