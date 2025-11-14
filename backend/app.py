@@ -2485,7 +2485,8 @@ def add_subscription():
     except Exception as e:
         add_log("WARNING", f"获取服务器名称失败: {str(e)}", "monitor")
     
-    monitor.add_subscription(plan_code, datacenters, notify_available, notify_unavailable, server_name, None, None, auto_order)
+    auto_order_quantity = data.get("autoOrderQuantity", 0)  # 自动下单数量，0表示不限制（遵循2分钟限制）
+    monitor.add_subscription(plan_code, datacenters, notify_available, notify_unavailable, server_name, None, None, auto_order, auto_order_quantity)
     save_subscriptions()
     
     # 如果监控未运行，自动启动
@@ -4428,51 +4429,56 @@ def quick_order():
                 add_log("WARNING", f"快速下单前价格缺失或无效: {plancode}@{datacenter}", "config_sniper")
                 return jsonify({"success": False, "error": "该组合暂无有效价格，暂不支持下单"}), 400
 
+        # 检查是否跳过重复检查（用于批量下单，不受2分钟限制）
+        skip_duplicate_check = data.get('skipDuplicateCheck', False)
+        
         # 防重复（仅限 quick-order）：若同一 planCode+datacenter+options（配置指纹）
         # 已在队列运行/等待，或刚刚成功下过单，则拒绝再次入队
-        now_ts = time.time()
-        duplicate_window_seconds = 120  # 2分钟窗口
+        # 但如果 skipDuplicateCheck 为 True，则跳过此检查（用于批量下单）
+        if not skip_duplicate_check:
+            now_ts = time.time()
+            duplicate_window_seconds = 120  # 2分钟窗口
 
-        def _fingerprint(opts):
-            if not opts:
-                return ""
-            try:
-                # 规范化：字符串化、去重、排序，生成稳定指纹
-                norm = sorted({str(x).strip() for x in opts if x is not None and str(x).strip() != ""})
-                return "|".join(norm)
-            except Exception:
-                return "|".join(sorted(map(str, opts)))
-
-        target_fp = _fingerprint(options)
-
-        # 1) 检查队列中的运行中/等待中任务
-        for item in queue:
-            if (
-                item.get("planCode") == plancode and
-                item.get("datacenter") == datacenter and
-                item.get("status") in ["running", "pending", "paused"] and
-                _fingerprint(item.get("options")) == target_fp
-            ):
-                add_log("INFO", f"检测到重复的队列任务（含配置），拒绝再次入队: {plancode}@{datacenter} options={options} (任务ID: {item.get('id')})", "config_sniper")
-                return jsonify({"success": False, "error": "已存在相同配置的购买任务，稍后再试"}), 429
-        # 2) 检查近期成功的历史（避免短时间内多次下单）
-        for hist in reversed(purchase_history):
-            if (
-                hist.get("planCode") == plancode and
-                hist.get("datacenter") == datacenter and
-                hist.get("status") == "success" and
-                _fingerprint(hist.get("options")) == target_fp
-            ):
+            def _fingerprint(opts):
+                if not opts:
+                    return ""
                 try:
-                    ts = hist.get("purchaseTime")
-                    # ISO 字符串 -> epoch
-                    recent = datetime.fromisoformat(ts).timestamp() if isinstance(ts, str) else None
-                    if recent and (now_ts - recent) < duplicate_window_seconds:
-                        remaining_seconds = int(duplicate_window_seconds - (now_ts - recent))
-                        add_log("INFO", f"检测到近期成功订单（含配置，{int(now_ts - recent)}秒内），拒绝再次入队: {plancode}@{datacenter} options={options}", "config_sniper")
-                        return jsonify({"success": False, "error": f"同机房2分钟内限制：刚刚已成功下过同配置订单（{datacenter}），请等待 {remaining_seconds} 秒后再试"}), 429
+                    # 规范化：字符串化、去重、排序，生成稳定指纹
+                    norm = sorted({str(x).strip() for x in opts if x is not None and str(x).strip() != ""})
+                    return "|".join(norm)
                 except Exception:
-                    pass
+                    return "|".join(sorted(map(str, opts)))
+
+            target_fp = _fingerprint(options)
+
+            # 1) 检查队列中的运行中/等待中任务
+            for item in queue:
+                if (
+                    item.get("planCode") == plancode and
+                    item.get("datacenter") == datacenter and
+                    item.get("status") in ["running", "pending", "paused"] and
+                    _fingerprint(item.get("options")) == target_fp
+                ):
+                    add_log("INFO", f"检测到重复的队列任务（含配置），拒绝再次入队: {plancode}@{datacenter} options={options} (任务ID: {item.get('id')})", "config_sniper")
+                    return jsonify({"success": False, "error": "已存在相同配置的购买任务，稍后再试"}), 429
+            # 2) 检查近期成功的历史（避免短时间内多次下单）
+            for hist in reversed(purchase_history):
+                if (
+                    hist.get("planCode") == plancode and
+                    hist.get("datacenter") == datacenter and
+                    hist.get("status") == "success" and
+                    _fingerprint(hist.get("options")) == target_fp
+                ):
+                    try:
+                        ts = hist.get("purchaseTime")
+                        # ISO 字符串 -> epoch
+                        recent = datetime.fromisoformat(ts).timestamp() if isinstance(ts, str) else None
+                        if recent and (now_ts - recent) < duplicate_window_seconds:
+                            remaining_seconds = int(duplicate_window_seconds - (now_ts - recent))
+                            add_log("INFO", f"检测到近期成功订单（含配置，{int(now_ts - recent)}秒内），拒绝再次入队: {plancode}@{datacenter} options={options}", "config_sniper")
+                            return jsonify({"success": False, "error": f"同机房2分钟内限制：刚刚已成功下过同配置订单（{datacenter}），请等待 {remaining_seconds} 秒后再试"}), 429
+                    except Exception:
+                        pass
 
         # 价格校验通过后再创建队列项（不再重复检查可用性）
         current_time = datetime.now().isoformat()

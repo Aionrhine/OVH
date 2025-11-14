@@ -14,6 +14,7 @@ interface Subscription {
   notifyAvailable: boolean;
   notifyUnavailable: boolean;
   autoOrder?: boolean;
+  autoOrderQuantity?: number;  // 自动下单数量，0或不设置表示遵循2分钟限制
   lastStatus: Record<string, string>;
   createdAt: string;
 }
@@ -62,8 +63,9 @@ const MonitorPage = () => {
     planCode: '',
     datacenters: '',
     notifyAvailable: true,
-  notifyUnavailable: false,
-  autoOrder: false
+    notifyUnavailable: false,
+    autoOrder: false,
+    autoOrderQuantity: 0  // 自动下单数量，0表示不限制（遵循2分钟限制）
   });
 
   // 加载订阅列表
@@ -181,7 +183,8 @@ const MonitorPage = () => {
         datacenters: datacenters.length > 0 ? datacenters : [],
         notifyAvailable: formData.notifyAvailable,
         notifyUnavailable: formData.notifyUnavailable,
-        autoOrder: formData.autoOrder
+        autoOrder: formData.autoOrder,
+        autoOrderQuantity: formData.autoOrder ? (formData.autoOrderQuantity > 0 ? formData.autoOrderQuantity : 0) : 0
       });
       
       toast.success(`已订阅 ${formData.planCode}`);
@@ -190,7 +193,8 @@ const MonitorPage = () => {
         datacenters: '',
         notifyAvailable: true,
         notifyUnavailable: false,
-        autoOrder: false
+        autoOrder: false,
+        autoOrderQuantity: 0
       });
       setShowAddForm(false);
       loadSubscriptions(true);
@@ -445,6 +449,30 @@ const MonitorPage = () => {
                   <span className="text-sm">有货自动下单</span>
                 </label>
               </div>
+              {formData.autoOrder && (
+                <div>
+                  <label className="block text-sm text-cyber-muted mb-1">
+                    自动下单数量（每个机房）
+                    <span className="text-xs text-cyber-muted ml-2">
+                      （留空或0表示遵循2分钟限制，设置数量后不受限制）
+                    </span>
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={formData.autoOrderQuantity || ''}
+                    onChange={(e) => {
+                      const value = parseInt(e.target.value) || 0;
+                      setFormData({...formData, autoOrderQuantity: value >= 0 ? value : 0});
+                    }}
+                    placeholder="例如: 5（有货后立即下单5台，不受2分钟限制）"
+                    className="cyber-input w-full"
+                  />
+                  <p className="text-xs text-cyber-muted mt-1">
+                    💡 设置数量后，有货时会立即按数量下单，不受同机房2分钟限制
+                  </p>
+                </div>
+              )}
               <div className="flex gap-3">
                 <button 
                   type="submit" 
@@ -518,7 +546,7 @@ const MonitorPage = () => {
                       )}
                       {sub.autoOrder && (
                         <span className="text-xs px-2 py-0.5 bg-cyber-accent/20 text-cyber-accent rounded">
-                          自动下单
+                          自动下单{sub.autoOrderQuantity > 0 ? ` (${sub.autoOrderQuantity}台/机房)` : ''}
                         </span>
                       )}
                     </div>

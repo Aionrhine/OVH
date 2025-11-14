@@ -62,7 +62,7 @@ class ServerMonitor:
             # 兼容无zoneinfo环境：使用UTC+8近似
             return datetime.utcnow() + timedelta(hours=8)
     
-    def add_subscription(self, plan_code, datacenters=None, notify_available=True, notify_unavailable=False, server_name=None, last_status=None, history=None, auto_order=False):
+    def add_subscription(self, plan_code, datacenters=None, notify_available=True, notify_unavailable=False, server_name=None, last_status=None, history=None, auto_order=False, auto_order_quantity=0):
         """
         添加服务器订阅
         
@@ -84,6 +84,8 @@ class ServerMonitor:
             existing["notifyUnavailable"] = notify_unavailable
             # 更新自动下单标记
             existing["autoOrder"] = bool(auto_order)
+            # 更新自动下单数量
+            existing["autoOrderQuantity"] = int(auto_order_quantity) if auto_order_quantity else 0
             # 更新服务器名称（总是更新，即使为None也要更新）
             existing["serverName"] = server_name
             # 确保历史记录字段存在
@@ -101,9 +103,10 @@ class ServerMonitor:
             "createdAt": datetime.now().isoformat(),
             "history": history if history is not None else []  # 恢复历史记录或初始化为空
         }
-        # 自动下单标记
+        # 自动下单标记和数量
         if auto_order:
             subscription["autoOrder"] = True
+        subscription["autoOrderQuantity"] = int(auto_order_quantity) if auto_order_quantity else 0
         
         # 添加服务器名称（如果提供）
         if server_name:
@@ -396,8 +399,13 @@ class ServerMonitor:
                                 except requests.exceptions.RequestException as e:
                                     self.add_log("WARNING", f"[monitor->order] 价格验证请求异常: {str(e)}", "monitor")
                         
+                        # 获取自动下单数量（如果设置了数量，则批量下单，不受2分钟限制）
+                        auto_order_quantity = subscription.get("autoOrderQuantity", 0)
+                        skip_duplicate_check = auto_order_quantity > 0  # 如果设置了数量，跳过2分钟限制
+                        order_count = auto_order_quantity if auto_order_quantity > 0 else 1  # 下单数量
+                        
                         # 对所有有货的机房进行并发下单（如果plan_code已标记为有效，都跳过价格核验）
-                        def place_order(notif):
+                        def place_order(notif, order_index=0):
                             """下单函数（用于并发执行）"""
                             dc_to_order = notif["dc"]
                             # 使用配置级 options（若存在），否则留空让后端自动匹配
@@ -406,20 +414,21 @@ class ServerMonitor:
                                 "planCode": plan_code,
                                 "datacenter": dc_to_order,
                                 "options": order_options,
-                                "skipPriceCheck": is_valid_plan_code  # 如果plan_code有效，跳过价格核验
+                                "skipPriceCheck": is_valid_plan_code,  # 如果plan_code有效，跳过价格核验
+                                "skipDuplicateCheck": skip_duplicate_check  # 如果设置了数量，跳过2分钟限制
                             }
                             headers = {"X-API-Key": API_SECRET_KEY}
                             api_url = "http://127.0.0.1:19998/api/config-sniper/quick-order"
                             
                             if is_valid_plan_code:
-                                self.add_log("INFO", f"[monitor->order] 尝试快速下单（跳过价格核验）: {plan_code}@{dc_to_order}, options={order_options}", "monitor")
+                                self.add_log("INFO", f"[monitor->order] 尝试快速下单（跳过价格核验）: {plan_code}@{dc_to_order}, options={order_options}, 数量={order_count}, 跳过限制={skip_duplicate_check}", "monitor")
                             else:
-                                self.add_log("INFO", f"[monitor->order] 尝试快速下单: {plan_code}@{dc_to_order}, options={order_options}", "monitor")
+                                self.add_log("INFO", f"[monitor->order] 尝试快速下单: {plan_code}@{dc_to_order}, options={order_options}, 数量={order_count}, 跳过限制={skip_duplicate_check}", "monitor")
                             
                             try:
                                 resp = requests.post(api_url, json=payload, headers=headers, timeout=30)
                                 if resp.status_code == 200:
-                                    self.add_log("INFO", f"[monitor->order] 快速下单成功: {plan_code}@{dc_to_order}", "monitor")
+                                    self.add_log("INFO", f"[monitor->order] 快速下单成功: {plan_code}@{dc_to_order} (第{order_index + 1}/{order_count}单)", "monitor")
                                     return True
                                 else:
                                     self.add_log("WARNING", f"[monitor->order] 快速下单失败({resp.status_code}): {resp.text}", "monitor")
@@ -429,13 +438,19 @@ class ServerMonitor:
                                 return False
                         
                         # 使用线程池并发执行所有下单请求
-                        self.add_log("INFO", f"[monitor->order] 并发执行 {len(available_notifications)} 个下单请求", "monitor")
-                        with ThreadPoolExecutor(max_workers=min(len(available_notifications), 10)) as executor:
-                            # 提交所有下单任务
-                            future_to_notif = {executor.submit(place_order, notif): notif for notif in available_notifications}
+                        # 如果设置了数量，需要为每个机房下单多次
+                        total_orders = len(available_notifications) * order_count
+                        self.add_log("INFO", f"[monitor->order] 并发执行 {total_orders} 个下单请求（{len(available_notifications)}个机房 × {order_count}单/机房）", "monitor")
+                        with ThreadPoolExecutor(max_workers=min(total_orders, 10)) as executor:
+                            # 提交所有下单任务（如果设置了数量，每个机房下单多次）
+                            future_to_notif = {}
+                            for notif in available_notifications:
+                                for i in range(order_count):
+                                    future = executor.submit(place_order, notif, i)
+                                    future_to_notif[future] = (notif, i)
                             # 等待所有任务完成（不阻塞，但会等待结果）
                             for future in as_completed(future_to_notif):
-                                notif = future_to_notif[future]
+                                notif, order_index = future_to_notif[future]
                                 try:
                                     _ = future.result()
                                 except Exception as e:
