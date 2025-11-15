@@ -55,3 +55,4 @@ ENV/
 backend/data/
 backend/cache/
 backend/logs/
+.trae/
